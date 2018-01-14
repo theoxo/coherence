@@ -41,6 +41,7 @@ type
                        AckRead, -- acknowledge request for S
                        AckWrite, -- acknowledge request for M
                        AckWB, -- acknowledge request for writeback
+                       AckData, -- acknowledge data has been received
                        DataReqS, -- request data from owner and have it change to S
                        DataReqI, -- request data from owner and have it change to I
                        DataNoReqI, -- go to I, no non-home requestor to send to
@@ -73,7 +74,7 @@ type
     Record
       -- processor state: again, three stable states (M,S,I) but you need to
       -- add transient states to support races
-      state: enum { PM, PS, PI, PIMad, PIMa, PIMd, PSMa, PMI, PSI, PIIa 
+      state: enum { PM, PS, PI, PIMad, PIMa, PIMd, PSMa, PMIa, PSI, PMS, PIIa
                   };
     End;
 
@@ -180,6 +181,7 @@ Begin
       Send(DataReqS, HomeNode.owner, HomeType, VC1, msg.src, msg.cnt);
       HomeNode.state := HSd;
       AddToSharersList(msg.src);
+      AddToSharersList(HomeNode.owner);
       Send(AckRead, msg.src, HomeType, VC2, msg.aux, msg.cnt);
 
     case WriteReq:
@@ -192,6 +194,10 @@ Begin
       -- TODO: perform actions here!
       Send(DataNoReqI, HomeNode.owner, HomeType, VC1, msg.aux, msg.cnt);
       HomeNode.state := HId;
+
+    case DataResp:
+      -- Have received data as part of a M-to-M transition.
+      Send(AckData, msg.src, HomeType, VC2, UNDEFINED, UNDEFINED);
 
     else
       ErrorUnhandledMsg(msg, HomeType);
@@ -211,12 +217,14 @@ Begin
     case WriteReq:
       -- TODO: perform actions here!
       -- invalidate all sharers -- does this syntax work?
+
       for proc:Proc do
-          Send(Inv, proc, HomeType, VC0, UNDEFINED, msg.count);
-          RemoveFromSharersList(proc);
+        RemoveFromSharersList(proc);
+        Send(Inv, proc, HomeType, VC0, UNDEFINED, msg.cnt); -- will need to handle Inv in every processor state
       endfor;
     
       HomeNode.state := HM;
+      HomeNode.owner := msg.src;
       Send(AckWrite, msg.src, HomeType, VC2, msg.aux, msg.cnt);
       
     else
@@ -230,7 +238,7 @@ Begin
 
       switch msg.mtype
 
-      case DataMsg:
+      case DataResp:
         -- Have received data, can safely transition to HS (after having updated memory)
         HomeNode.state := HS;
         -- Let sender know we've received
@@ -238,12 +246,12 @@ Begin
 
       else -- probably want to stall rather than throw error
         ErrorUnhandledMsg(msg, HomeType);
-  endswitch;
+      endswitch;
 
   case HId:
       switch msg.mtype
 
-      case DataMsg:
+      case DataResp:
         -- Received data, go to HI
         HomeNode.state := HI;
         -- Let sender know we've received
@@ -251,7 +259,15 @@ Begin
       
       else -- again probably not what we want
         ErrorUnhandledMsg(msg, HomeType);
+      endswitch;
 
+  ----------------------------
+  -- Error catch
+  ----------------------------
+  else
+    ErrorUnhandledState();
+
+  endswitch;
 End;
 
 Procedure ProcReceive(msg:Message; p:Proc);
@@ -266,24 +282,15 @@ Begin
 
     switch msg.mtype
       -- TODO: handle message cases here!
-  MessageType: enum {  ReadReq,         -- request for shared state
-		                   WriteReq,        -- write request
-		                   WBReq,            -- writeback request (w/ or wo/ data)
-                       -- TODO: add more messages here!
-                       AckRead, -- acknowledge request for S
-                       AckWrite, -- acknowledge request for M
-                       AckWB, -- acknowledge request for writeback
-                       AckData, -- acknowledge data has been received
-                       DataReqS, -- request data from owner and have it change to S
-                       DataReqI, -- request data from owner and have it change to I
-                       DataNoReqI, -- go to I, no non-home requestor to send to
-                       DataResp -- send data
-                       Inv
-      state: enum { PM, PS, PI, PIMad, PIMa, PIMd, PSMa, PMI, PSI, PIIa, PMS 
-                  };
 
     -- in PI, we don't expect any messages - we want to be the one to initiate a coherence transaction.
-    -- thus there are no cases to consider
+    -- thus there are no cases to consider, other than an unexpected (snooping) Inv or Data (from PIMd -> PI)
+    case Inv:
+      -- do nothing
+
+    case DataResp:
+      -- do nothing
+
     else
       ErrorUnhandledMsg(msg, p);
     endswitch;
@@ -293,21 +300,24 @@ Begin
     switch msg.mtype
       -- TODO: handle message cases here!
 
+    case Inv:
+      -- do nothing
+
     case DataReqS:
         -- Have received a forwarded data request from another processor and been asked to go to S.
         ps := PMS;
-        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.count);
-        Send(DataResp, msg.aux, p, VC0, UNDEFINED, msg.count);
+        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.cnt);
+        Send(DataResp, msg.aux, p, VC0, UNDEFINED, msg.cnt);
 
     case DataReqI:
         -- As before, but go to I
-        ps := PSI;
-        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.count);
-        Send(DataResp, msg.aux, p, VC0, UNDEFINED, msg.count);
+        ps := PMIa;
+        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.cnt);
+        Send(DataResp, msg.aux, p, VC0, UNDEFINED, msg.cnt);
 
     case DataNoReqI:
-        ps := PSI;
-        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.count);
+        ps := PMIa;
+        Send(DataResp, HomeType, p, VC0, UNDEFINED, msg.cnt);
 
     else
       ErrorUnhandledMsg(msg, p);
@@ -327,6 +337,90 @@ Begin
     endswitch;
 
   -- TODO: add additional states from Proc here!  
+
+  case PIMad:
+    switch msg.mtype
+
+    case Inv:
+      ps := PIIa;
+    
+    case AckWrite:
+      -- Seen ack, now need data
+      ps := PIMd;
+
+    case DataResp:
+      ps := PIMa;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+  case PIMa:
+    switch msg.mtype
+
+    case Inv:
+      ps := PIIa;
+
+    case AckWrite:
+      ps := PM;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+  case PIMd:
+    switch msg.mtype
+      
+    case Inv:
+      ps := PI;
+
+    case DataResp:
+      ps := PM;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+  case PSMa:
+    switch msg.mtype
+
+    case AckWrite:
+        ps := PM;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+  case PMIa:
+    switch msg.mtype
+
+    case AckData:
+      ps := PI;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+
+  case PMS:
+    switch msg.mtype
+    
+    case AckData:
+      ps := PS;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
+
+  case PIIa:
+    switch msg.mtype
+
+    case AckWrite:
+      ps := PI;
+
+    else
+      ErrorUnhandledMsg(msg, p);
+    endswitch;
 
   ----------------------------
   -- Error catch
