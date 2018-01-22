@@ -11,7 +11,7 @@
 ----------------------------------------------------------------------
 const
   -- TODO: start with this number at 1, then increase to 2 and eventually 3
-  ProcCount: 1;          -- number processors
+  ProcCount: 2;          -- number processors
 
   -- VC0 for requests, VC1 for fwds, VC2 for responses
   VC0: 0;                -- low priority
@@ -230,16 +230,14 @@ Begin
       -- invalidate all sharers -- does this syntax work?
 
       HomeNode.state := HMa;
-    NumberAck := MultiSetCount(i:HomeNode.sharers, true);  
+      NumberAck := MultiSetCount(i:HomeNode.sharers, true);  
       HomeNode.owner := msg.src;
 
       for proc:Proc do
         RemoveFromSharersList(proc);
 
 
-        if proc != HomeNode.owner then 
-          Send(Inv, proc, HomeType, VC1, UNDEFINED, UNDEFINED); 
-        endif;
+        Send(Inv, proc, HomeType, VC1, msg.src, UNDEFINED); 
           -- will need to handle Inv in every processor state
 
       endfor;
@@ -283,8 +281,8 @@ Begin
         
           if NumberAck = 0 then
               HomeNode.state := HM;
-              Send(AckWrite, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
-              Send(DataResp, msg.src, HomeType, VC2, msg.aux, UNDEFINED);
+              Send(AckWrite, msg.aux, HomeType, VC1, msg.src, UNDEFINED);
+              Send(DataResp, msg.aux, HomeType, VC2, msg.src, UNDEFINED);
           endif;
 
         else
@@ -382,7 +380,7 @@ Begin
 
     case Inv:
       -- Have been asked to invalidate as someone else has requested write permission
-      Send(AckInv, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+      Send(AckInv, HomeType, p, VC2, msg.aux, UNDEFINED);
       ps := PI;
 
     else
@@ -500,7 +498,7 @@ Begin
 
     case Inv:
       ps := PIMad;
-      Send(AckInv, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+      Send(AckInv, HomeType, p, VC2, msg.aux, UNDEFINED);
 
     case DataResp:
       ps := PSMa;
@@ -730,10 +728,13 @@ Begin
     case AckPut:
       ps := PI;
 
+    case AckData:
+      ps := PI;
 
     case Inv:
       -- Already going to I, so do nothing
-
+      Send(AckInv, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+    
     else
       put "in ";
       put ps;
