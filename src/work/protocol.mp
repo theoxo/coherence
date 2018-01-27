@@ -11,7 +11,7 @@
 ----------------------------------------------------------------------
 const
   -- TODO: start with this number at 1, then increase to 2 and eventually 3
-  ProcCount: 1;          -- number processors
+  ProcCount: 2;          -- number processors
 
   -- VC0 for requests, VC1 for fwds, VC2 for responses
   VC0: 0;                -- low priority
@@ -19,7 +19,7 @@ const
   VC2: 2;                -- high priority
   NumVCs: VC2 - VC0 + 1;
   QMax: 2;
-  NetMax: ProcCount+1;
+  NetMax: ProcCount+2;
   
 
 ----------------------------------------------------------------------
@@ -38,18 +38,13 @@ type
 		                   WriteReq,        -- write request
 		                   WBReq,            -- writeback request (w/ or wo/ data)
                        -- TODO: add more messages here!
-                       AckPut,
-                       AckRead, -- acknowledge request for S
-                       AckWrite, -- acknowledge request for M
-                       AckWB, -- acknowledge request for writeback
-                       AckData, -- acknowledge data has been received
-                       Fwd_GetS, -- request data from owner and have it change to S
-                       Fwd_GetM, -- request data from owner and have it change to I
-                       DataNoReqI, -- go to I, no non-home requestor to send to
                        DataResp, -- send data
                        Inv, -- invalidate
-                       PutS, -- degrade
-                       AckInv
+                       InvAck,
+		                   WriteBack,
+                       Force_WB,
+                       NACK,
+                       SpontWB -- spontaneous write back
                     };
 
   Message:
@@ -66,7 +61,7 @@ type
     Record
       -- home node state: you have three stable states (M,S,I) but need to
       -- add transient states during races
-      state: enum { HM, HS, HI, HSd, HMa, HMd };
+      state: enum { HM, HS, HI, HSM, HMS, HMM };
       -- TODO: add transient states here! };
 
       owner: Node;	
@@ -77,7 +72,7 @@ type
     Record
       -- processor state: again, three stable states (M,S,I) but you need to
       -- add transient states to support races
-      state: enum { PM, PS, PI, PIMad, PIMa, PIMd, PISad, PISa, PISd, PSMad, PSMd, PSMa, PMIa, PSIa, PMS, PIIa
+      state: enum { PM, PS, PI, PIM, PIS, PSM
                   };
     End;
 
@@ -89,7 +84,8 @@ var
   Procs: array [Proc] of ProcState;
   Net:   array [Node] of multiset [NetMax] of Message;
   msg_processed: boolean;
-  NumberAck: 0..ProcCount;
+  NumberOfAcksPending: 0..ProcCount;
+  ReplyTo: Proc;
 
 ----------------------------------------------------------------------
 -- Procedures
@@ -155,24 +151,17 @@ Begin
     switch msg.mtype
 
     case ReadReq:
-      -- TODO: perform actions here!
       HomeNode.state := HS;
       AddToSharersList(msg.src);
-      Send(AckRead, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
-      Send(DataResp, msg.src, HomeType, VC2, msg.aux, UNDEFINED);
-      -- what should the last 2 arguments be? is the VC convention followed right?
-
+      Send(DataResp, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
 
     case WriteReq:
-      -- TODO: perform actions here!
-      Send(AckWrite, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
-      -- Should also send "fake" data response?
-      Send(DataResp, msg.src, HomeType, VC2, msg.aux, UNDEFINED);
+      Send(DataResp, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
       HomeNode.state := HM;
       HomeNode.owner := msg.src;
 
     else
-      msg_processed := false;
+      ErrorUnhandledMsg(msg, HomeType);
 
     endswitch;
 
@@ -183,26 +172,31 @@ Begin
     switch msg.mtype
 
     case ReadReq:
-      -- Need to: get data. Make sure that owner changes to S. Change self to HSd. Allow requestor to obtain S.
-      Send(Fwd_GetS, HomeNode.owner, HomeType, VC1, msg.src, UNDEFINED);
-      HomeNode.state := HSd;
-      AddToSharersList(msg.src);
-      AddToSharersList(HomeNode.owner);
-      Send(AckRead, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
+      if (HomeNode.owner = msg.src) then
+        -- Must be a writeback incoming we have not yet received
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+      else
+        Send(Force_WB, HomeNode.owner, HomeType, VC1, msg.src, UNDEFINED);
+        ReplyTo := msg.src;
+        HomeNode.state := HMS;
+      endif;
 
     case WriteReq:
-      -- TODO: perform actions here!
-      -- Need to: get data. Make sure that owner changes to I. Self stay in HM. Allow requestor to obtain M.
-      Send(Fwd_GetM, HomeNode.owner, HomeType, VC1, msg.src, UNDEFINED);
-      Send(AckWrite, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
-      HomeNode.state := HMd;
+      if (msg.src = HomeNode.owner) then
+        -- there must be a waiting WriteBack that we have not yet seen!
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+      else
+        HomeNode.state := HMM;
+        ReplyTo := msg.src;
+        Send(Force_WB, HomeNode.owner, HomeType, VC1, UNDEFINED, UNDEFINED);
+      endif;
       
-    case WBReq:
+    case SpontWB:
       HomeNode.state := HI;
-      Send(AckWB, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
+      HomeNode.owner := UNDEFINED;
 
     else
-      msg_processed := false;
+      ErrorUnhandledMsg(msg, HomeType);
 
     endswitch;
 
@@ -211,37 +205,18 @@ Begin
 
     switch msg.mtype
 
-    case PutS:
-      RemoveFromSharersList(msg.src);
-      Send(AckPut, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
-
-      if MultiSetCount(i:HomeNode.sharers, true) = 0 then
-        HomeNode.state := HI;
-      endif;
-
     case ReadReq:
-      -- TODO: perform actions here!
       AddToSharersList(msg.src);
-      Send(AckRead, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
       Send(DataResp, msg.src, HomeType, VC2, msg.aux, UNDEFINED);
 
     case WriteReq:
-      -- TODO: perform actions here!
-      -- invalidate all sharers -- does this syntax work?
-
-      HomeNode.state := HMa;
-    NumberAck := MultiSetCount(i:HomeNode.sharers, true);  
-      HomeNode.owner := msg.src;
+      HomeNode.state := HSM;
+      NumberOfAcksPending := ProcCount; 
+      ReplyTo := msg.src;
 
       for proc:Proc do
-        RemoveFromSharersList(proc);
-
-
-        if proc != HomeNode.owner then 
-          Send(Inv, proc, HomeType, VC1, UNDEFINED, UNDEFINED); 
-        endif;
+        Send(Inv, proc, HomeType, VC1, UNDEFINED, UNDEFINED); 
           -- will need to handle Inv in every processor state
-
       endfor;
     
 
@@ -249,60 +224,86 @@ Begin
       msg_processed := false;
 
     endswitch;
-
-  -- TODO: add other cases from home node state here!
-  case HSd:
-      Assert (cnt != 0) "sharers list empty, but line is shared";
-
+  
+  case HMS:
       switch msg.mtype
 
-      case DataResp:
-        -- Have received data, can safely transition to HS (after having updated memory)
+      case ReadReq:
+        -- We're still waiting for WB
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+
+      case WriteReq:
+        -- We're still waiting for WB
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+
+      case WriteBack:
+        AddToSharersList(ReplyTo);
+        Send(DataResp, ReplyTo, HomeType, VC2, UNDEFINED, UNDEFINED);
+        HomeNode.owner := UNDEFINED;
+        ReplyTo := UNDEFINED;
         HomeNode.state := HS;
-        -- Let sender know we've received
-        Send(AckData, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED); -- note still don't know how to handle cnt
 
-      case PutS:
-        RemoveFromSharersList(msg.src);
-        Send(AckPut, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+      case InvAck:
+        -- Processor was forced to invalidate before data arrived.
+        -- Can safely proceed as if we received data
+        AddToSharersList(ReplyTo);
+        Send(DataResp, ReplyTo, HomeType, VC2, UNDEFINED, UNDEFINED);
+        HomeNode.owner := UNDEFINED;
+        ReplyTo := UNDEFINED;
+        HomeNode.state := HS;
 
-        if MultiSetCount(i:HomeNode.sharers, true) = 0 then
-          HomeNode.state := HI;
-        endif;
-
-      else -- probably want to stall rather than throw error
-        msg_processed := false;
       endswitch;
 
+  case HSM:
+      switch msg.mtype
 
-    case HMa:
-        switch msg.mtype
+      case ReadReq:
+        -- We're still waiting for invalidate(s) 
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
 
-        case AckInv:
-          NumberAck := NumberAck - 1;
-        
-          if NumberAck = 0 then
-              HomeNode.state := HM;
-              Send(AckWrite, msg.src, HomeType, VC1, msg.aux, UNDEFINED);
-              Send(DataResp, msg.src, HomeType, VC2, msg.aux, UNDEFINED);
-          endif;
+      case WriteReq:
+        -- We're still waiting for WB
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
 
-        else
-          msg_processed := false;
+      case InvAck:
+        NumberOfAcksPending := NumberOfAcksPending - 1;
+        RemoveFromSharersList(msg.src);
 
-        endswitch;
+        if (NumberOfAcksPending = 0) then
+          Send(DataResp, ReplyTo, HomeType, VC2, UNDEFINED, UNDEFINED);
+          HomeNode.owner := ReplyTo;
+          ReplyTo := UNDEFINED;
+          HomeNode.state := HM;
+        endif;
+           
+      endswitch;
 
-    case HMd:
-        switch msg.mtype
+  case HMM:
+      switch msg.mtype
 
-        case DataResp:
+      case ReadReq:
+        -- We're still waiting for WB
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+
+      case WriteReq:
+        -- We're still waiting for WB
+        Send(NACK, msg.src, HomeType, VC1, UNDEFINED, UNDEFINED);
+
+      case WriteBack:
+        Send(DataResp, ReplyTo, HomeType, VC2, UNDEFINED, UNDEFINED);
+        HomeNode.owner := ReplyTo;
+        ReplyTo := UNDEFINED;
         HomeNode.state := HM;
 
-        else
-          msg_processed := false;
+      case InvAck:
+        -- Processor was forced to invalidate before data arrived.
+        -- Can safely proceed as if we received data
+        Send(DataResp, ReplyTo, HomeType, VC2, UNDEFINED, UNDEFINED);
+        HomeNode.owner := ReplyTo;
+        ReplyTo := UNDEFINED;
+        HomeNode.state := HM;
 
-        endswitch;
-
+      endswitch;
   ----------------------------
   -- Error catch
   ----------------------------
@@ -320,18 +321,25 @@ Begin
   alias ps:Procs[p].state do
 
   switch ps
+
   case PI:
 
     switch msg.mtype
       -- TODO: handle message cases here!
 
-    -- in PI, we don't expect any messages - we want to be the one to initiate a coherence transaction.
-    -- thus there are no cases to consider, other than an unexpected (snooping) Inv or Data (from PIMd -{inv}> PI)
     case Inv:
-      -- do nothing
+      -- must've already evicted!
+      Send(InvAck, msg.src, p, VC2, UNDEFINED, UNDEFINED);
 
     case DataResp:
-      -- do nothing
+      -- stale data, do nothing
+
+    case Force_WB:
+      -- must've written back already. ignore
+
+    case NACK:
+      -- must've been in a transition but then got inv'd,
+      -- either way can safely ignore
 
     else
       put "in ";
@@ -348,23 +356,13 @@ Begin
       -- TODO: handle message cases here!
 
     case Inv:
-      -- do nothing
+      -- must've already evicted!
+      Send(InvAck, msg.src, p, VC2, UNDEFINED, UNDEFINED);
 
-    case Fwd_GetS:
-        -- Have received a forwarded data request from another processor and been asked to go to S.
-        ps := PMS;
-        Send(DataResp, HomeType, p, VC2, UNDEFINED, UNDEFINED);
-        Send(DataResp, msg.aux, p, VC2, UNDEFINED, UNDEFINED);
-
-    case Fwd_GetM:
-        -- As before, but go to I
-        ps := PMIa;
-        Send(DataResp, HomeType, p, VC2, UNDEFINED, UNDEFINED);
-        Send(DataResp, msg.aux, p, VC2, UNDEFINED, UNDEFINED);
-
-    case DataNoReqI:
-        ps := PMIa;
-        Send(DataResp, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+    case Force_WB:
+      -- As before, but go to I
+      ps := PI;
+      Send(WriteBack, HomeType, p, VC1, UNDEFINED, UNDEFINED);
 
     else
       put "in ";
@@ -382,8 +380,14 @@ Begin
 
     case Inv:
       -- Have been asked to invalidate as someone else has requested write permission
-      Send(AckInv, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+      Send(InvAck, HomeType, p, VC2, UNDEFINED, UNDEFINED);
       ps := PI;
+
+    case Force_WB:
+      -- must've written back already. ignore
+
+    case DataResp:
+     -- this must be a lingering stale response from a previous request that got overriden by an Inv
 
     else
       put "in ";
@@ -396,126 +400,27 @@ Begin
 
   -- TODO: add additional states from Proc here!  
 
-  case PIMad:
+  case PIM:
     switch msg.mtype
 
     case Inv:
       -- Irrelevant snooped inv;
       -- Processor is not a sharer so how can it have been inv?
-      -- thus do nothing
-    
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
-
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    case DataNoReqI:
-      -- stall
-      msg_processed := false;
-
-    case AckWrite:
-      -- Seen ack, now need data
-      ps := PIMd;
-
-    case DataResp:
-      ps := PIMa;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PIMa:
-    switch msg.mtype
-
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
-
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    case DataNoReqI:
-      -- stall
-      msg_processed := false;
-
-    case Inv:
-      -- Irrelevant snooped inv;
-      -- Processor is not a sharer so how can it have been inv?
-      -- thus do nothing
-
-    case AckWrite:
-      ps := PM;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PIMd:
-    switch msg.mtype
-
-    case Inv:
-      -- Irrelevant snooped inv;
-      -- Processor is not a sharer so how can it have been inv?
-      -- thus do nothing
+      Send(InvAck, HomeType, p, VC2, UNDEFINED, UNDEFINED);
       
     case DataResp:
+      -- Our request has been fullfilled
       ps := PM;
 
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
+    case Force_WB:
+      -- Has arrived before we got the data. Will send InvAck to distinguish this case
+      -- (on the directory's side). Data will be discarded when it arrives in PI.
+      Send(InvAck, HomeType, p, VC2, UNDEFINED, UNDEFINED);
+      ps := PI;
 
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PSMad:
-    switch msg.mtype
-
-    case AckWrite:
-        ps := PSMd;
-
-    case Inv:
-      ps := PIMad;
-      Send(AckInv, HomeType, p, VC2, UNDEFINED, UNDEFINED);
-
-    case DataResp:
-      ps := PSMa;
-
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
-
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    case DataNoReqI:
-      -- stall
-      msg_processed := false;
+    case NACK:
+      -- request was denied
+      ps := PI;
 
     else
       put "in ";
@@ -526,110 +431,26 @@ Begin
       ErrorUnhandledMsg(msg, p);
     endswitch;
 
-  case PSMa:
-    switch msg.mtype
-
-    case AckWrite:
-        ps := PM;
-
-    case Inv:
-      ps := PIMa;
-
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
-
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    case DataNoReqI:
-      -- stall
-      msg_processed := false;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PSMd:
+  case PSM:
     switch msg.mtype
 
     case DataResp:
       ps := PM;
 
     case Inv:
-      ps := PIMd;
+      ps := PIM;
+      Send(InvAck, HomeType, p, VC1, UNDEFINED, UNDEFINED);
 
-    case Fwd_GetS:
-      -- stall
-      msg_processed := false;
-
-    case Fwd_GetM:
-      -- stall
-      msg_processed := false;
-
-    case DataNoReqI:
-      -- stall
-      msg_processed := false;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PMIa:
-    switch msg.mtype
-
-    case Inv:
-      -- do nothing
-
-    case Fwd_GetS:
-        -- Have received a forwarded data request from another processor and been asked to go to S.
-        ps := PSIa;
-        Send(DataResp, HomeType, p, VC2, UNDEFINED, UNDEFINED);
-        Send(DataResp, msg.aux, p, VC2, UNDEFINED, UNDEFINED);
-
-    case Fwd_GetM:
-        -- Only need to send data to req to uphold our end of the trade
-        Send(DataResp, msg.aux, p, VC2, UNDEFINED, UNDEFINED);
-    
-    case AckData:
-      -- have received data acknowledgement due to previously having been sent Fwd_GetM
-      -- do nothing
-
-    case AckWB:
-      --put "have degraded\n";
+    case Force_WB:
+      -- Has arrived before we got the data. Will send InvAck to distinguish this case
+      -- (on the directory's side). Data will be discarded when it arrives in PI.
+      Send(InvAck, HomeType, p, VC2, UNDEFINED, UNDEFINED);
       ps := PI;
 
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-
-  case PMS:
-    switch msg.mtype
-    
-    case AckData:
+    case NACK:
+      -- request was denied
       ps := PS;
 
-    case Inv:
-      -- stall until actual sharer
-      msg_processed := false;
-
     else
       put "in ";
       put ps;
@@ -639,101 +460,24 @@ Begin
       ErrorUnhandledMsg(msg, p);
     endswitch;
 
-  case PIIa:
+  case PIS:
     switch msg.mtype
-
-    case AckWrite:
-      ps := PI;
-
-    case AckRead:
-      ps := PI;
-
-    case AckPut:
-      ps := PI;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PISad:
-    switch msg.mtype
-
-    case AckRead:
-      ps := PISd;
 
     case Inv:
-      -- stall until actual sharer
-      msg_processed := false;
+      -- Inv arrived before data; data will be discarded in PI.
+      ps := PI;
+      Send(InvAck, HomeType, p, VC2, UNDEFINED, UNDEFINED);
 
     case DataResp:
-      -- Have been sent data as other processor owned all tokens for memory location,
-      -- thus need to update ours before reading
-      ps := PISa;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PISa:
-    switch msg.mtype
-
-    case AckRead:
       ps := PS;
 
-    case Inv:
-      -- stall until actual sharer
-      msg_processed := false;
+    case Force_WB:
+      -- must've written back already. ignore
 
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PISd:
-    switch msg.mtype
-
-    case Inv:
-      -- stall until actual sharer
-      msg_processed := false;
-
-    case DataResp:
-      -- Have been sent data as other processor owned all tokens for memory location,
-      -- thus need to update ours before reading
-      ps := PS;
-
-    else
-      put "in ";
-      put ps;
-      put ", found unexpected ";
-      put msg.mtype;
-      put "\n";
-      ErrorUnhandledMsg(msg, p);
-    endswitch;
-
-  case PSIa:
-    switch msg.mtype
-
-    case AckPut:
+    case NACK:
+      -- request was denied
       ps := PI;
 
-
-    case Inv:
-      -- Already going to I, so do nothing
-
     else
       put "in ";
       put ps;
@@ -742,12 +486,6 @@ Begin
       put "\n";
       ErrorUnhandledMsg(msg, p);
     endswitch;
-    
---  case PIIa:
-  --  switch msg.mtype
-
-    --case AckPut:
-      --ps := PI;
 
   ----------------------------
   -- Error catch
@@ -773,7 +511,7 @@ ruleset n:Proc Do
   ==>
     Send(ReadReq, HomeType, n, VC0, UNDEFINED, UNDEFINED);
     -- TODO: any other actions?
-    p.state := PISad;
+    p.state := PIS;
   endrule;
 
   rule "write request"
@@ -781,7 +519,7 @@ ruleset n:Proc Do
   ==>
     Send(WriteReq, HomeType, n, VC0, UNDEFINED, UNDEFINED);
     -- TODO: any other actions?
-    p.state := PIMad;
+    p.state := PIM;
   endrule;
 
   rule "upgrade request"
@@ -789,22 +527,21 @@ ruleset n:Proc Do
   ==>
     Send(WriteReq, HomeType, n, VC0, UNDEFINED, UNDEFINED);
     -- TODO: any other actions?
-    p.state := PSMad;
+    p.state := PSM;
   endrule;
 
   rule "writeback"
     (p.state = PM)
   ==>
-    Send(WBReq, HomeType, n, VC0, UNDEFINED, UNDEFINED);  -- fixme
+    Send(SpontWB, HomeType, n, VC0, UNDEFINED, UNDEFINED);  -- fixme
     -- TODO: any other actions?
-    p.state := PMIa;
+    p.state := PI;
   endrule;
 
   rule "evict"
     (p.state = PS)
   ==>
-    Send(PutS, HomeType, n, VC0, UNDEFINED, UNDEFINED);
-    p.state := PSIa;
+    p.state := PI; -- silent eviction
   endrule;
 
   endalias;
