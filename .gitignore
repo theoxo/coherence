@@ -1,0 +1,7 @@
+# Ignore all as baseline
+/*
+
+# Match only protocol.m, gitignore itself, and readme
+!.gitignore
+!README.md
+!./src/work/protocol.m
