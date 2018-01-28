@@ -19,7 +19,7 @@ const
   VC2: 2;                -- high priority
   NumVCs: VC2 - VC0 + 1;
   QMax: 2;
-  NetMax: ProcCount+3;
+  NetMax: ProcCount+3; -- (this was given as +1 in framework but that didn't work with this design)
   
 
 ----------------------------------------------------------------------
