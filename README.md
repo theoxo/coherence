@@ -1,7 +1,13 @@
 # cache_coherence
 Cache protocol checked with Murphi. For the cache coherence lab offered by CMU [here](https://users.ece.cmu.edu/~bgold/teaching/coherence.html).
+=====
+**Sunday 28/01/18** 
+Works for 3 processors, but involved a little bit of cheating (namely increasing the network bandwidth from #processors+1 to #processors+3).
+Noteworthy: Uses both NACKS and stalls.
+Not optimized.
 
-Current issue:
+=====
+Last issue:
 Ran into issues with a race that more or less goes like this:
 
 | C1            | C2                | Directory           | Network                |
@@ -19,8 +25,7 @@ Ran into issues with a race that more or less goes like this:
 
 Now the directory controller is in M, and C1 thinks it is exclusive yet C2 has (unknowingly) received a stale DataResp.
 
-I'm currently trying to tackle this by including a "timestamp" (msg.cnt) with each message that the processor can then compare to its own "time" to see whether a perceived response is just a lingering old one or not. 
-Sadly Murphi is telling me "3 not in range for Parameter or function result.." when the msg.cnt reaches three, which I don't really know how to tackle / why that is.
+I tried to solve this by introducing "timestamps" to messages to see whether they were stale or not, but ultimately it seemed to make more sense to just allow the processor to stall Inv messages when it is in IS and IM.
 
 |  test   |   ing  |
 | ------  | ------ |
