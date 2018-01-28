@@ -1,5 +1,7 @@
 # cache_coherence
 Cache protocol checked with Murphi. For the cache coherence lab offered by CMU [here](https://users.ece.cmu.edu/~bgold/teaching/coherence.html).
+Verified using [CMurphi](https://github.com/melver/cmurphi).
+
 ---
 
 **Sunday 28/01/18** 
