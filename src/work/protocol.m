@@ -75,7 +75,7 @@ type
       -- add transient states to support races
       state: enum { PM, PS, PI, PIM, PIS, PSM
                   };
-      cnt: 0..3;
+      cnt: 0..999;
     End;
 
 ----------------------------------------------------------------------
