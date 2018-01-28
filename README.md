@@ -5,7 +5,7 @@ Verified using [CMurphi](https://github.com/melver/cmurphi).
 ---
 
 **Sunday 28/01/18** 
-Works for 3 processors, but involved a little bit of cheating (namely increasing the network bandwidth from #processors+1 to #processors+3).
+Works for 3 processors, but involved a little bit of cheating (namely increasing the network bandwidth from #processors+1 to #processors+2).
 Noteworthy: Uses NACKS, stalls, and broadcasted Inv's.
 Not optimized.
 
